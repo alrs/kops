@@ -14,6 +14,7 @@
 
 
 DOCKER_REGISTRY?=gcr.io/must-override
+DOCKER_WORKING:=/go/src/k8s.io/kops
 S3_BUCKET?=s3://must-override/
 GCS_LOCATION?=gs://must-override
 GCS_URL=$(GCS_LOCATION:gs://%=https://storage.googleapis.com/%)
@@ -31,6 +32,7 @@ GOBINDATA=$(LOCAL)/go-bindata
 CHANNELS=$(LOCAL)/channels
 NODEUP=$(LOCAL)/nodeup
 PROTOKUBE=$(LOCAL)/protokube
+DNS_CONTROLLER=$(LOCAL)/dns-controller
 UPLOAD=$(BUILD)/upload
 UID:=$(shell id -u)
 GID:=$(shell id -g)
@@ -105,12 +107,12 @@ channels-install: ${CHANNELS}
 	cp ${CHANNELS} ${GOPATH_1ST}/bin
 
 .PHONY: all-install # Install all kops project binaries
-all-install: all kops-install channels-install
+all-install: all kops-install channels-install dns-controller-install
 	cp ${NODEUP} ${GOPATH_1ST}/bin
 	cp ${PROTOKUBE} ${GOPATH_1ST}/bin
 
 .PHONY: all
-all: ${KOPS} ${PROTOKUBE} ${NODEUP} ${CHANNELS}
+all: ${KOPS} ${PROTOKUBE} ${NODEUP} ${CHANNELS} ${DNS_CONTROLLER}
 
 .PHONY: help
 help: # Show this help
@@ -244,7 +246,7 @@ kops-dist: crossbuild-in-docker
 	(${SHASUMCMD} ${DIST}/linux/amd64/kops | cut -d' ' -f1) > ${DIST}/linux/amd64/kops.sha1
 
 .PHONY: version-dist
-version-dist: nodeup-dist kops-dist protokube-export utils-dist
+version-dist: nodeup-dist kops-dist protokube-export utils-dist dns-controller-dist
 	rm -rf ${UPLOAD}
 	mkdir -p ${UPLOAD}/kops/${VERSION}/linux/amd64/
 	mkdir -p ${UPLOAD}/kops/${VERSION}/darwin/amd64/
@@ -390,9 +392,16 @@ nodeup-dist:
 	docker cp nodeup-build-${UNIQUE}:/go/src/k8s.io/kops/.build/local/nodeup .build/dist/
 	(${SHASUMCMD} .build/dist/nodeup | cut -d' ' -f1) > .build/dist/nodeup.sha1
 
-.PHONY: dns-controller-gocode
-dns-controller-gocode:
-	go install -tags 'peer_name_alternative peer_name_hash' -ldflags "${EXTRA_LDFLAGS} -X main.BuildVersion=${DNS_CONTROLLER_TAG}" k8s.io/kops/dns-controller/cmd/dns-controller
+
+${DNS_CONTROLLER}:
+	go build -tags 'peer_name_alternative peer_name_hash' -ldflags "${EXTRA_LDFLAGS} -X main.BuildVersion=${DNS_CONTROLLER_TAG}" -o $@ k8s.io/kops/dns-controller/cmd/dns-controller
+
+.PHONY: dns-controller
+dns-controller: ${DNS_CONTROLLER}
+
+.PHONY: dns-controller-install
+dns-controller-install: ${DNS_CONTROLLER}
+	cp ${DNS_CONTROLLER} ${GOPATH_1ST}/bin
 
 .PHONY: dns-controller-builder-image
 dns-controller-builder-image:
@@ -409,6 +418,16 @@ dns-controller-image: dns-controller-build-in-docker
 .PHONY: dns-controller-push
 dns-controller-push: dns-controller-image
 	docker push ${DOCKER_REGISTRY}/dns-controller:${DNS_CONTROLLER_TAG}
+
+.PHONY: dns-controller-dist
+dns-controller-dist:
+	mkdir -p ${DIST}
+	docker pull golang:${GOVERSION}
+	docker run -w ${DOCKER_WORKING} --name=dns-controller-build-${UNIQUE} -e STATIC_BUILD=yes -e VERSION=${VERSION} -v ${MAKEDIR}:/go/src/k8s.io/kops golang:${GOVERSION} make -f /go/src/k8s.io/kops/Makefile dns-controller
+	docker start dns-controller-build-${UNIQUE}
+	docker exec dns-controller-build-${UNIQUE} chown -R ${UID}:${GID} .build/
+	docker cp dns-controller-build-${UNIQUE}:/go/src/k8s.io/kops/.build/local/dns-controller .build/dist/linux/amd64
+	(${SHASUMCMD} .build/dist/dns-controller | cut -d' ' -f1) > .build/dist/dns-controller.sha1
 
 # --------------------------------------------------
 # static utils
