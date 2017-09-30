@@ -97,12 +97,6 @@ ifndef SHASUMCMD
   $(error "Neither sha1sum nor shasum command is available")
 endif
 
-.PHONY: build-container
-build-container: .build/container
-
-.build/container: ${SOURCES} ${BINDATA_TARGETS}
-	docker build --iidfile $@ -t ${BUILD_IMAGE_NAME} -f ./images/kops-builder/Dockerfile .
-
 .PHONY: kops-install # Install kops to local $GOPATH/bin
 kops-install: gobindata-tool ${BINDATA_TARGETS}
 	go install ${EXTRA_BUILDFLAGS} -ldflags "-X k8s.io/kops.Version=${VERSION} -X k8s.io/kops.GitVersion=${GITSHA} ${EXTRA_LDFLAGS}" k8s.io/kops/cmd/kops/
@@ -535,6 +529,12 @@ kops-server-push: kops-server-build
 # -----------------------------------------------------
 # non-phony crossbuild targets
 
+.PHONY: build-container
+build-container: .build/container
+
+.build/container: ${SOURCES} ${BINDATA_TARGETS}
+	docker build --iidfile $@ -t ${BUILD_IMAGE_NAME} -f ./images/kops-builder/Dockerfile .
+
 define BINARY_template =
 .build/kops/${KOPS_RELEASE_VERSION}/$(2)/$(3)/$(1): .build/container
 	mkdir -p .build/kops/${KOPS_RELEASE_VERSION}/$(2)/$(3)
@@ -549,10 +549,8 @@ define BINARY_template =
 	docker rm kops-build-$(1)-$(2)-$(3)-${UNIQUE}
 endef
 
-
 .PHONY: linux
 linux: 	.build/kops/${KOPS_RELEASE_VERSION}/linux/amd64/kops
-
 
 #.build/kops/${KOPS_RELEASE_VERSION}/linux/amd64/kops:
 $(eval $(call BINARY_template,kops,linux,amd64))
