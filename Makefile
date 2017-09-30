@@ -25,18 +25,19 @@ BUILD=$(GOPATH_1ST)/src/k8s.io/kops/.build
 LOCAL=$(BUILD)/local
 BINDATA_TARGETS=upup/models/bindata.go federation/model/bindata.go
 ARTIFACTS=$(BUILD)/artifacts
-DIST=$(BUILD)/dist
+DIST=$(BUILD)/kops
 IMAGES=$(DIST)/images
 GOBINDATA=$(LOCAL)/go-bindata
 CHANNELS=$(LOCAL)/channels
 NODEUP=$(LOCAL)/nodeup
 PROTOKUBE=$(LOCAL)/protokube
-UPLOAD=$(BUILD)/upload
 UID:=$(shell id -u)
 GID:=$(shell id -g)
 TESTABLE_PACKAGES:=$(shell egrep -v "k8s.io/kops/cloudmock|k8s.io/kops/vendor" hack/.packages) 
-
+GIT_BRANCH:=$(shell git rev-parse --abbrev-ref HEAD)
+BUILD_IMAGE_NAME:=kops-build-${GIT_BRANCH}
 SOURCES:=$(shell find . -name "*.go")
+DOCKER_RUN:=docker run -w /go/src/k8s.io/kops ${BUILD_CONTAINER_ID}
 
 # See http://stackoverflow.com/questions/18136918/how-to-get-current-relative-directory-of-your-makefile
 MAKEDIR:=$(strip $(shell dirname "$(realpath $(lastword $(MAKEFILE_LIST)))"))
@@ -95,6 +96,12 @@ SHASUMCMD := $(shell command -v sha1sum || command -v shasum; 2> /dev/null)
 ifndef SHASUMCMD
   $(error "Neither sha1sum nor shasum command is available")
 endif
+
+.PHONY: build-container
+build-container: .build/container
+
+.build/container: ${SOURCES} ${BINDATA_TARGETS}
+	docker build --iidfile $@ -t ${BUILD_IMAGE_NAME} -f ./images/kops-builder/Dockerfile .
 
 .PHONY: kops-install # Install kops to local $GOPATH/bin
 kops-install: gobindata-tool ${BINDATA_TARGETS}
@@ -202,40 +209,6 @@ hooks: # Install Git hooks
 .PHONY: test
 test: ${BINDATA_TARGETS}  # Run tests locally
 	go test -v ${TESTABLE_PACKAGES}
-
-${DIST}/linux/amd64/nodeup: ${BINDATA_TARGETS}
-	mkdir -p ${DIST}
-	GOOS=linux GOARCH=amd64 go build -a ${EXTRA_BUILDFLAGS} -o $@ -ldflags "${EXTRA_LDFLAGS} -X k8s.io/kops.Version=${VERSION} -X k8s.io/kops.GitVersion=${GITSHA}" k8s.io/kops/cmd/nodeup
-
-.PHONY: crossbuild-nodeup
-crossbuild-nodeup: ${DIST}/linux/amd64/nodeup
-
-.PHONY: crossbuild-nodeup-in-docker
-crossbuild-nodeup-in-docker:
-	docker pull golang:${GOVERSION} # Keep golang image up to date
-	docker run --name=nodeup-build-${UNIQUE} -e STATIC_BUILD=yes -e VERSION=${VERSION} -v ${MAKEDIR}:/go/src/k8s.io/kops golang:${GOVERSION} make -f /go/src/k8s.io/kops/Makefile crossbuild-nodeup
-	docker cp nodeup-build-${UNIQUE}:/go/.build .
-
-${DIST}/darwin/amd64/kops: ${BINDATA_TARGETS}
-	mkdir -p ${DIST}
-	GOOS=darwin GOARCH=amd64 go build -a ${EXTRA_BUILDFLAGS} -o $@ -ldflags "${EXTRA_LDFLAGS} -X k8s.io/kops.Version=${VERSION} -X k8s.io/kops.GitVersion=${GITSHA}" k8s.io/kops/cmd/kops
-
-${DIST}/linux/amd64/kops: ${BINDATA_TARGETS}
-	mkdir -p ${DIST}
-	GOOS=linux GOARCH=amd64 go build -a ${EXTRA_BUILDFLAGS} -o $@ -ldflags "${EXTRA_LDFLAGS} -X k8s.io/kops.Version=${VERSION} -X k8s.io/kops.GitVersion=${GITSHA}" k8s.io/kops/cmd/kops
-
-.PHONY: crossbuild
-crossbuild: ${DIST}/darwin/amd64/kops ${DIST}/linux/amd64/kops
-
-.PHONY: crossbuild-in-docker
-crossbuild-in-docker:
-	docker pull golang:${GOVERSION} # Keep golang image up to date
-	docker run --name=kops-build-${UNIQUE} -e STATIC_BUILD=yes -e VERSION=${VERSION} -v ${MAKEDIR}:/go/src/k8s.io/kops golang:${GOVERSION} make -f /go/src/k8s.io/kops/Makefile crossbuild
-	docker start kops-build-${UNIQUE}
-	docker exec kops-build-${UNIQUE} chown -R ${UID}:${GID} /go/src/k8s.io/kops/.build
-	docker cp kops-build-${UNIQUE}:/go/src/k8s.io/kops/.build .
-	docker kill kops-build-${UNIQUE}
-	docker rm kops-build-${UNIQUE}
 
 .PHONY: kops-dist
 kops-dist: crossbuild-in-docker
@@ -558,3 +531,34 @@ kops-server-build:
 .PHONY: kops-server-push
 kops-server-push: kops-server-build
 	docker push ${DOCKER_REGISTRY}/kops-server:latest
+
+# -----------------------------------------------------
+# non-phony crossbuild targets
+
+define BINARY_template =
+.build/kops/${KOPS_RELEASE_VERSION}/$(2)/$(3)/$(1): .build/container
+	mkdir -p .build/kops/${KOPS_RELEASE_VERSION}/$(2)/$(3)
+	${DOCKER_RUN} -e "GOOS=$(2)" -e "GOARCH=$(3)" \
+	--name kops-build-$(1)-$(2)-$(3)-${UNIQUE} \
+	$$(shell cat .build/container) \
+	go build ${EXTRA_BUILDFLAGS} \
+	-ldflags "-X k8s.io/kops.Version=${VERSION} \
+	-X k8s.io/kops.GitVersion=${GITSHA} ${EXTRA_LDFLAGS}" \
+	-o $$@ k8s.io/kops/cmd/$(1)/
+	docker cp kops-build-$(1)-$(2)-$(3)-${UNIQUE}:/go/src/k8s.io/kops/$$@ $$@ 
+	docker rm kops-build-$(1)-$(2)-$(3)-${UNIQUE}
+endef
+
+
+.PHONY: linux
+linux: 	.build/kops/${KOPS_RELEASE_VERSION}/linux/amd64/kops
+
+
+#.build/kops/${KOPS_RELEASE_VERSION}/linux/amd64/kops:
+$(eval $(call BINARY_template,kops,linux,amd64))
+$(eval $(call BINARY_template,nodeup,linux,amd64))
+$(eval $(call BINARY_template,kops-server,linux,amd64))
+
+.PHONY: darwin
+darwin: .build/kops/${KOPS_RELEASE_VERSION}/darwin/amd64/kops
+$(eval $(call BINARY_template,kops,darwin,amd64))
